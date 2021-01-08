@@ -26,6 +26,7 @@ import (
 
 	"github.com/LINBIT/drbdtop/pkg/collect"
 	"github.com/LINBIT/drbdtop/pkg/resource"
+	"github.com/LINBIT/drbdtop/pkg/update"
 )
 
 // Version defines the version of the program and gets set via ldflags
@@ -40,7 +41,21 @@ func main() {
 
 	events := make(chan resource.Event, 5)
 	go input.Collect(events, errors)
+  resources := update.NewResourceCollection(duration)
+  go func() {
+   for {
+     <-time.After(3 * time.Second)
+     fmt.Printf("Printer\n");
+     resources.RLock()
+     fmt.Printf("PrinterLock\n");
+     for _, r := range resources.Map {
+       fmt.Printf("%v\n",r);
+     }
+     resources.RUnlock()
+   }
+ }()
   for m:= range events {
-   fmt.Printf("%v\n",m);
+   fmt.Printf(".");
+   resources.Update(m)
   }
 }
