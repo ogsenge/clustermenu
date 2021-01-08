@@ -43,19 +43,40 @@ func main() {
 	go input.Collect(events, errors)
   resources := update.NewResourceCollection(duration)
   go func() {
+   progress:= "-/|\\"
+   i:=0
    for {
-     <-time.After(3 * time.Second)
-     fmt.Printf("Printer\n");
+     <-time.After(1 * time.Second)
+     resources.UpdateList()
      resources.RLock()
-     fmt.Printf("PrinterLock\n");
-     for _, r := range resources.Map {
-       fmt.Printf("%v\n",r);
+     fmt.Print("\033[H\033[2J")
+     fmt.Printf("%c%19s %10s %14s %10s %10s %14s %10s\n",progress[i%len(progress)], "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync");
+
+     for _,r  := range resources.List {
+       r.RLock()
+       d := r.Device
+       for k, v := range d.Volumes {
+         fmt.Printf("%02s%18s %10s ",v.Minor, r.Res.Name, r.Res.Role);
+         fmt.Printf("%14s ",v.DiskState)
+         for _, c := range r.Connections {
+           fmt.Printf("%10s %10s ", c.ConnectionStatus,c.Role)
+         }
+         for _,p:= range r.PeerDevices {
+           if vr,ok:=p.Volumes[k]; ok {
+             fmt.Printf("%14s ",vr.DiskState)
+             fmt.Printf("%9d%%", int(vr.OutOfSyncKiB.Current*100/v.Size))
+           }
+         }
+         fmt.Printf("\n");
+       }
+       r.RUnlock()
      }
      resources.RUnlock()
+     i++
    }
  }()
   for m:= range events {
-   fmt.Printf(".");
+   //fmt.Printf(".");
    resources.Update(m)
   }
 }
