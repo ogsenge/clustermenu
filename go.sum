@@ -1,3 +1,5 @@
+github.com/LINBIT/drbdtop v0.2.3 h1:xeDnnkjmfT/H/CS26SFUkvjTefWMgmxwEMDSjnCLFy8=
+github.com/LINBIT/drbdtop v0.2.3/go.mod h1:SuAkLrXsQs1mwxBfxBzUC+lKmVkwFHIO0nlgReuvXCY=
 github.com/LINBIT/godrbdutils v0.0.0-20170719082427-76bfda2b35d2 h1:3nNXIB4jto/xbUFD8NEaLrXl4uJhe6dM103NRSsWc1U=
 github.com/LINBIT/godrbdutils v0.0.0-20170719082427-76bfda2b35d2/go.mod h1:BwaNH2Y7xU4sn0OJj7EMT2ZkUjhBg3Lzp6Hae/0g2+Q=
 github.com/LINBIT/termui v0.0.0-20170328115949-8b6463531678 h1:hD2NhtaAT1LccGHfVTKb4Mxjs1Oh841lhqtRHQgblLs=

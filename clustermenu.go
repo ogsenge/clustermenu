@@ -16,13 +16,31 @@
  *along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
-package display
+package main
 
-import "github.com/LINBIT/drbdtop/pkg/resource"
+import (
+	"fmt"
+//	"log"
+//	"os"
+	"time"
 
-// Displayer provides information to the user via the screen, printing to a file,
-// writing to the network, ect.
-type Displayer interface {
-	// The main loop for a displayer. Program exits when this function returns.
-	Display(<-chan resource.Event, <-chan error)
+	"github.com/LINBIT/drbdtop/pkg/collect"
+	"github.com/LINBIT/drbdtop/pkg/resource"
+)
+
+// Version defines the version of the program and gets set via ldflags
+var Version string
+
+func main() {
+	errors := make(chan error, 100)
+
+	duration := time.Second * 1
+
+  input := collect.Events2Poll{Interval: duration}
+
+	events := make(chan resource.Event, 5)
+	go input.Collect(events, errors)
+  for m:= range events {
+   fmt.Printf("%v\n",m);
+  }
 }

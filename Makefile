@@ -1,5 +1,5 @@
-PROJECT_NAME = drbdtop
-MAIN = drbdtop.go
+PROJECT_NAME = clustermenu
+MAIN = clustermenu.go
 LATESTTAG=$(shell git describe --abbrev=0 --tags | tr -d 'v')
 VERSION=`git describe --tags --always --dirty`
 GOOS=linux
@@ -32,9 +32,9 @@ release:
 # packaging, you need the packaging branch for these
 
 # we build binary-only packages and use the static binary in this tarball
-drbdtop-$(LATESTTAG).tar.gz: build
+clustermenu-$(LATESTTAG).tar.gz: build
 	dh_clean || true
-	tar --transform="s,^,drbdtop-$(LATESTTAG)/," --owner=0 --group=0 -czf $@ drbdtop debian drbdtop.spec
+	tar --transform="s,^,clustermenu-$(LATESTTAG)/," --owner=0 --group=0 -czf $@ clustermenu debian clustermenu.spec
 
 # consistency with the other linbit projects
-debrelease: drbdtop-$(LATESTTAG).tar.gz
+debrelease: clustermenu-$(LATESTTAG).tar.gz

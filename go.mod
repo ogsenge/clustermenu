@@ -1,8 +1,9 @@
-module github.com/LINBIT/drbdtop
+module github.com/ogsenge/clustermenu
 
 go 1.12
 
 require (
+	github.com/LINBIT/drbdtop v0.2.3
 	github.com/LINBIT/godrbdutils v0.0.0-20170719082427-76bfda2b35d2
 	github.com/LINBIT/termui v0.0.0-20170328115949-8b6463531678
 	github.com/alecthomas/assert v0.0.0-20170929043011-405dbfeb8e38 // indirect
