@@ -42,6 +42,8 @@ github.com/nsf/termbox-go v0.0.0-20170301014343-91bae1bb5fa9 h1:5IzvsUDaj4GRGUVL
 github.com/nsf/termbox-go v0.0.0-20170301014343-91bae1bb5fa9/go.mod h1:IuKpRQcYE1Tfu+oAQqaLisqDeXgjyyltCfsaoYN18NQ=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/rthornton128/goncurses v0.0.0-20210302221415-1355ee05acae h1:8rderMEUQ5WTjFX6a2m6tR+BHwoxjD6w0oId1DG3oZE=
+github.com/rthornton128/goncurses v0.0.0-20210302221415-1355ee05acae/go.mod h1:AHlKFomPTwmO7H2vL8d7VNrQNQmhMi/DBhDnHRhjbCo=
 github.com/sergi/go-diff v1.0.0 h1:Kpca3qRNrduNnOQeazBd0ysaKrUJiIuISHxogkT9RPQ=
 github.com/sergi/go-diff v1.0.0/go.mod h1:0CfEIISq7TuYL3j771MWULgwwjU+GofnZX9QAmXWZgo=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

@@ -22,6 +22,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.0-20170201023540-14207d285c6c // indirect
 	github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7 // indirect
 	github.com/nsf/termbox-go v0.0.0-20170301014343-91bae1bb5fa9 // indirect
+	github.com/rthornton128/goncurses v0.0.0-20210302221415-1355ee05acae
 	github.com/sergi/go-diff v1.0.0 // indirect
 	github.com/stretchr/testify v1.3.0 // indirect
 	golang.org/x/sys v0.0.0-20170213225739-e24f485414ae // indirect
