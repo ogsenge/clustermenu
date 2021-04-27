@@ -24,6 +24,7 @@ package main
 import "C"
 
 import (
+	"fmt"
 	"github.com/LINBIT/drbdtop/pkg/collect"
 	"github.com/LINBIT/drbdtop/pkg/resource"
 	"github.com/LINBIT/drbdtop/pkg/update"
@@ -32,6 +33,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -77,7 +80,104 @@ func onResize(channel chan os.Signal) {
 	}
 }
 
+type Paddy int
+
+const (
+	Sys Paddy = iota
+	Drbd
+	Menu
+	Jobs
+)
+
+func newPad(y, x int) *gc.Pad {
+	pad, err := gc.NewPad(800, 200)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return pad
+}
+
+func myExec(name string, arg ...string) string {
+	cmd := exec.Command(name, arg...)
+	cmd.Env = append(os.Environ(),
+		"SYSTEMD_COLORS=1",
+	)
+	//		cmd := exec.Command("uptime")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return string(out)
+}
+
+var i int
+
+func filter(ss []string, rex string) (ret []string) {
+	for _, s := range ss {
+		if matched, _ := regexp.MatchString(rex, s); matched {
+			ret = append(ret, s)
+		}
+	}
+	return
+}
+
+func jobStatus(pad *gc.Pad) bool {
+	working := false
+	jobs := myExec("systemctl", "list-jobs")
+	lines := strings.Split(jobs, "\n")
+	run := filter(lines, `running`)
+	wait := filter(lines, `waiting`)
+	if len(run) > 0 {
+		colorPrint(pad, strings.Join(run, "\n"))
+		working = true
+	} else {
+		colorPrint(pad, myExec("systemctl", "list-jobs"))
+	}
+	if len(wait) > 0 {
+		colorPrint(pad, fmt.Sprintf("\n+%2d waiting", len(wait)))
+		working = true
+	}
+	return working
+}
+
+func drbdSatus(pad *gc.Pad, resources *update.ResourceCollection) {
+	progress := "-/|\\"
+	resources.UpdateList()
+	resources.RLock()
+	pad.Printf("%c%19s %10s %14s %10s %10s %14s %10s\n", progress[i%len(progress)], "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
+
+	for _, r := range resources.List {
+		r.RLock()
+		d := r.Device
+		keys := make([]string, 0, len(d.Volumes))
+		for k := range d.Volumes {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, k := range keys {
+			v := d.Volumes[k]
+			pad.Printf("%02s%18s %10s ", v.Minor, r.Res.Name, r.Res.Role)
+			pad.Printf("%14s ", v.DiskState)
+			for _, c := range r.Connections {
+				pad.Printf("%10s %10s ", c.ConnectionStatus, c.Role)
+			}
+			for _, p := range r.PeerDevices {
+				if vr, ok := p.Volumes[k]; ok {
+					pad.Printf("%14s ", vr.DiskState)
+					pad.Printf("%9d%%", int(vr.OutOfSyncKiB.Current*100/v.Size))
+				}
+			}
+			pad.Printf("\n")
+		}
+		r.RUnlock()
+	}
+	resources.RUnlock()
+	i++
+}
+
 func main() {
+	allPads := []Paddy{Sys, Drbd, Menu, Jobs}
 	resizeChannel := make(chan os.Signal)
 	signal.Notify(resizeChannel, syscall.SIGWINCH)
 	go onResize(resizeChannel)
@@ -108,25 +208,11 @@ func main() {
 	gc.StartColor()
 	gc.UseDefaultColors()
 	stdscr.NoutRefresh()
-
-	var padSys, padDrbd, padMenu, padJobs *gc.Pad
-	padSys, err = gc.NewPad(800, 200)
-	if err != nil {
-		log.Fatal(err)
+	pad := make(map[Paddy]*gc.Pad)
+	for _, p := range allPads {
+		pad[p] = newPad(800, 200)
 	}
-	padDrbd, err = gc.NewPad(800, 200)
-	if err != nil {
-		log.Fatal(err)
-	}
-	padMenu, err = gc.NewPad(800, 200)
-	if err != nil {
-		log.Fatal(err)
-	}
-	padJobs, err = gc.NewPad(800, 200)
-	if err != nil {
-		log.Fatal(err)
-	}
-	//pad.Keypad(true)
+	stdscr.Keypad(true)
 
 	key := make(chan gc.Key)
 
@@ -141,61 +227,25 @@ func main() {
 			resources.Update(m)
 		}
 	}()
-	progress := "-/|\\"
-	i := 0
+	splitCols := 40
+	rowOffset := 6
 main:
 	for {
-		padSys.Erase()
-		padDrbd.Erase()
-		padJobs.Erase()
-		padMenu.Erase()
+		for _, p := range allPads {
+			pad[p].Erase()
+		}
 		rows, cols := stdscr.MaxYX()
-		//padSys.Printf("%d %d\n", rows, cols)
-		//padDrbd.Printf("%d %d\n", rows, cols)
-		padMenu.Printf("x\tscrollup\ny\tscroll down\nq\tquit")
-		cmd := exec.Command("systemctl", "list-dependencies", "multi-user.target")
-		//		cmd := exec.Command("uptime")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			log.Fatal(err)
-		}
-		colorPrint(padSys, string(out))
-		cmd = exec.Command("systemctl", "list-jobs")
-		//		cmd := exec.Command("uptime")
-		out, err = cmd.CombinedOutput()
-		if err != nil {
-			log.Fatal(err)
-		}
-		colorPrint(padJobs, string(out))
-		resources.UpdateList()
-		resources.RLock()
-		padDrbd.Printf("%c%19s %10s %14s %10s %10s %14s %10s\n", progress[i%len(progress)], "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
-
-		for _, r := range resources.List {
-			r.RLock()
-			d := r.Device
-			for k, v := range d.Volumes {
-				padDrbd.Printf("%02s%18s %10s ", v.Minor, r.Res.Name, r.Res.Role)
-				padDrbd.Printf("%14s ", v.DiskState)
-				for _, c := range r.Connections {
-					padDrbd.Printf("%10s %10s ", c.ConnectionStatus, c.Role)
-				}
-				for _, p := range r.PeerDevices {
-					if vr, ok := p.Volumes[k]; ok {
-						padDrbd.Printf("%14s ", vr.DiskState)
-						padDrbd.Printf("%9d%%", int(vr.OutOfSyncKiB.Current*100/v.Size))
-					}
-				}
-				padDrbd.Printf("\n")
-			}
-			r.RUnlock()
-		}
-		resources.RUnlock()
-		i++
-		padSys.NoutRefresh(scroll, 0, 1, 1, rows-6, int(cols/2)-1)
-		padDrbd.NoutRefresh(scroll, 0, 1, int(cols/2), rows-6, cols-2)
-		padMenu.NoutRefresh(0, 0, rows-6, 1, rows-1, int(cols/2)-1)
-		padJobs.NoutRefresh(scroll, 0, rows-6, int(cols/2), rows-1, cols-2)
+		splitRows := rows - rowOffset
+		//pad[Sys].Printf("%d %d\n", rows, cols)
+		pad[Menu].Printf("2\tEnable\n3\tDisable\n9\tLogout")
+		colorPrint(pad[Sys], strings.Split(myExec("systemctl", "list-dependencies", "cluster-active.target"), "multi-user.target")[0]+"multi-user.target")
+		jobStatus(pad[Jobs])
+		drbdSatus(pad[Drbd], resources)
+		//splitCols:=int(cols/2)
+		pad[Sys].NoutRefresh(scroll, 0, 0, 0, splitRows-1, splitCols-1)
+		pad[Drbd].NoutRefresh(scroll, 0, 0, splitCols+1, splitRows-1, cols-1)
+		pad[Menu].NoutRefresh(0, 0, splitRows+1, 0, rows-1, splitCols-1)
+		pad[Jobs].NoutRefresh(scroll, 0, splitRows+1, splitCols+1, rows-1, cols-1)
 		//stdscr.Refresh()
 		// Update will flush only the characters which have changed between the
 		// physical screen and the virtual screen, minimizing the number of
@@ -209,23 +259,32 @@ main:
 			//nothing
 		case k := <-key:
 			switch k {
-			case 'q':
+			case '9':
 				break main
-			case 'x':
+			case gc.KEY_UP:
 				if scroll > 0 {
 					scroll--
 				}
-			case 'y':
-				//	if scroll < rows-height {
+			case gc.KEY_DOWN:
 				scroll++
-				//	}
-				//case gc.KEY_RESIZE:
-				//	break main
+			case gc.KEY_LEFT:
+				if rowOffset > 0 {
+					rowOffset--
+				}
+			case gc.KEY_RIGHT:
+				if rowOffset < rows-1 {
+					rowOffset++
+				}
+			case '2':
+				myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "cluster-active.target")
+			case '3':
+				myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "multi-user.target")
 			}
 		case <-fin:
 			break main
 		}
 	}
-	padSys.Delete()
-	padDrbd.Delete()
+	for _, p := range allPads {
+		pad[p].Delete()
+	}
 }
