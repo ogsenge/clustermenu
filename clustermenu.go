@@ -43,8 +43,17 @@ import (
 
 // Version defines the version of the program and gets set via ldflags
 var Version string
-var colMap map[int]int
+var colorMap map[int]int
 var maxPair int
+
+type Paddy int
+
+const (
+	Sys Paddy = iota
+	Drbd
+	Menu
+	Jobs
+)
 
 func SetupCloseHandler() chan os.Signal {
 	c := make(chan os.Signal)
@@ -59,17 +68,16 @@ func colorPrint(win *gc.Pad, out string) {
 		tmp := strings.SplitN(i, "m", 2)
 		col := strings.Split(tmp[0], ";")
 		c, _ := strconv.Atoi(col[len(col)-1])
-		if idx, ok := colMap[c]; ok {
+		if idx, ok := colorMap[c]; ok {
 			win.ColorOn(int16(idx))
 		} else {
 			maxPair++
-			colMap[c] = maxPair
+			colorMap[c] = maxPair
 			gc.InitPair(int16(maxPair), int16(c-30), gc.C_BLACK)
 			win.ColorOn(int16(maxPair))
 		}
 		win.Print(tmp[1])
 	}
-
 }
 
 func onResize(channel chan os.Signal) {
@@ -79,15 +87,6 @@ func onResize(channel chan os.Signal) {
 		gc.Update()
 	}
 }
-
-type Paddy int
-
-const (
-	Sys Paddy = iota
-	Drbd
-	Menu
-	Jobs
-)
 
 func newPad(y, x int) *gc.Pad {
 	pad, err := gc.NewPad(800, 200)
@@ -102,15 +101,12 @@ func myExec(name string, arg ...string) string {
 	cmd.Env = append(os.Environ(),
 		"SYSTEMD_COLORS=1",
 	)
-	//		cmd := exec.Command("uptime")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Fatal(err)
 	}
 	return string(out)
 }
-
-var i int
 
 func filter(ss []string, rex string) (ret []string) {
 	for _, s := range ss {
@@ -121,30 +117,55 @@ func filter(ss []string, rex string) (ret []string) {
 	return
 }
 
-func jobStatus(pad *gc.Pad) bool {
-	working := false
+func isBetweenClusterStates() bool {
+	jobs := myExec("systemctl", "list-jobs")
+	lines := strings.Split(jobs, "\n")
+	noJob := filter(lines, `No jobs running.`)
+	if len(noJob) > 0 {
+		return false
+	}
+	return true
+}
+
+func printJobStatus(pad *gc.Pad) {
+	pad.Printf("=== Jobs ===\n")
 	jobs := myExec("systemctl", "list-jobs")
 	lines := strings.Split(jobs, "\n")
 	run := filter(lines, `running`)
 	wait := filter(lines, `waiting`)
 	if len(run) > 0 {
 		colorPrint(pad, strings.Join(run, "\n"))
-		working = true
 	} else {
-		colorPrint(pad, myExec("systemctl", "list-jobs"))
+		colorPrint(pad, jobs)
 	}
 	if len(wait) > 0 {
 		colorPrint(pad, fmt.Sprintf("\n+%2d waiting", len(wait)))
-		working = true
 	}
-	return working
 }
 
-func drbdSatus(pad *gc.Pad, resources *update.ResourceCollection) {
-	progress := "-/|\\"
+func printMenu(pad *gc.Pad) {
+	pad.Printf("=== Menu === \n")
+	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
+	pad.Printf("Please select an operation:\n")
+	if !isBetweenClusterStates() {
+		pad.Printf("2)\tEnable this computer\n")
+		pad.Printf("3)\tDisable this computer\n")
+		pad.Printf("4)\tShutdown this computer\n")
+		pad.Printf("5)\tReboot this computer\n")
+	}
+	pad.Printf("9)\tLogout")
+}
+
+func printSys(pad *gc.Pad) {
+	pad.Printf("=== Cluster Services === \n")
+	colorPrint(pad, strings.Split(myExec("systemctl", "list-dependencies", "cluster-active.target"), "multi-user.target")[0]+"multi-user.target")
+}
+
+func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 	resources.UpdateList()
 	resources.RLock()
-	pad.Printf("%c%19s %10s %14s %10s %10s %14s %10s\n", progress[i%len(progress)], "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
+	pad.Printf("=== DRBD resources === \n")
+	pad.Printf("%20s %10s %14s %10s %10s %14s %10s\n", "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
 
 	for _, r := range resources.List {
 		r.RLock()
@@ -173,7 +194,6 @@ func drbdSatus(pad *gc.Pad, resources *update.ResourceCollection) {
 		r.RUnlock()
 	}
 	resources.RUnlock()
-	i++
 }
 
 func main() {
@@ -182,13 +202,12 @@ func main() {
 	signal.Notify(resizeChannel, syscall.SIGWINCH)
 	go onResize(resizeChannel)
 
-	colMap = make(map[int]int)
+	colorMap = make(map[int]int)
 	fin := SetupCloseHandler()
 	C.setlocale(C.LC_ALL, C.CString(""))
 	errors := make(chan error, 100)
 
 	duration := time.Second * 1
-
 	input := collect.Events2Poll{Interval: duration}
 
 	events := make(chan resource.Event, 5)
@@ -228,7 +247,7 @@ func main() {
 		}
 	}()
 	splitCols := 40
-	rowOffset := 6
+	rowOffset := 9
 main:
 	for {
 		for _, p := range allPads {
@@ -237,30 +256,25 @@ main:
 		rows, cols := stdscr.MaxYX()
 		splitRows := rows - rowOffset
 		//pad[Sys].Printf("%d %d\n", rows, cols)
-		pad[Menu].Printf("2\tEnable\n3\tDisable\n9\tLogout")
-		colorPrint(pad[Sys], strings.Split(myExec("systemctl", "list-dependencies", "cluster-active.target"), "multi-user.target")[0]+"multi-user.target")
-		jobStatus(pad[Jobs])
-		drbdSatus(pad[Drbd], resources)
+		printSys(pad[Sys])
+		printJobStatus(pad[Jobs])
+		printMenu(pad[Menu])
+		printDrbdStatus(pad[Drbd], resources)
 		//splitCols:=int(cols/2)
 		pad[Sys].NoutRefresh(scroll, 0, 0, 0, splitRows-1, splitCols-1)
 		pad[Drbd].NoutRefresh(scroll, 0, 0, splitCols+1, splitRows-1, cols-1)
 		pad[Menu].NoutRefresh(0, 0, splitRows+1, 0, rows-1, splitCols-1)
 		pad[Jobs].NoutRefresh(scroll, 0, splitRows+1, splitCols+1, rows-1, cols-1)
-		//stdscr.Refresh()
 		// Update will flush only the characters which have changed between the
 		// physical screen and the virtual screen, minimizing the number of
 		// characters which must be sent
 		gc.Update()
 
-		// In order for the paddow to display correctly, we must call GetChar()
-		// on it rather than stdscr
 		select {
 		case <-time.After(1 * time.Second):
 			//nothing
 		case k := <-key:
 			switch k {
-			case '9':
-				break main
 			case gc.KEY_UP:
 				if scroll > 0 {
 					scroll--
@@ -276,9 +290,23 @@ main:
 					rowOffset++
 				}
 			case '2':
-				myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "cluster-active.target")
+				if !isBetweenClusterStates() {
+					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "cluster-active.target")
+				}
 			case '3':
-				myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "multi-user.target")
+				if !isBetweenClusterStates() {
+					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "multi-user.target")
+				}
+			case '4':
+				if !isBetweenClusterStates() {
+					myExec("sudo", "/usr/bin/systemctl", "poweroff")
+				}
+			case '5':
+				if !isBetweenClusterStates() {
+					myExec("sudo", "/usr/bin/systemctl", "reboot")
+				}
+			case '9':
+				break main
 			}
 		case <-fin:
 			break main
