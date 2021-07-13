@@ -45,6 +45,12 @@ import (
 var Version string
 var colorMap map[int]int
 var maxPair int
+var splitCluster bool
+var activeTarget string
+var drbdResources map[string][]string
+var confirmationPending bool
+var confirmationMessage string
+var confirmationCommand []string
 
 type Paddy int
 
@@ -54,6 +60,18 @@ const (
 	Menu
 	Jobs
 )
+
+type VolumeState struct {
+	Minor            string
+	ResourceName     string
+	LocalRole        string
+	LocalDisk        string
+	ConnectionStatus string
+	RemoteRole       string
+	RemoteDisk       string
+	OutOfSyncKib     uint64
+	VolumeSizeKib    uint64
+}
 
 func SetupCloseHandler() chan os.Signal {
 	c := make(chan os.Signal)
@@ -101,10 +119,7 @@ func myExec(name string, arg ...string) string {
 	cmd.Env = append(os.Environ(),
 		"SYSTEMD_COLORS=1",
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Fatal(err)
-	}
+	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
 
@@ -117,7 +132,41 @@ func filter(ss []string, rex string) (ret []string) {
 	return
 }
 
-func isBetweenClusterStates() bool {
+func systemdDependencyExclude(ss []string, rex string) (ret []string) {
+	inSubtree := false
+	prefix := ""
+	var prefixRegex *regexp.Regexp
+	prefixLength := 0
+	re := regexp.MustCompile(rex)
+	prefixConvert := regexp.MustCompile(`\[[0-9;]+m`)
+	for _, s := range ss {
+		if loc := re.FindStringIndex(s); loc != nil {
+			inSubtree = true
+			prefix = ""
+			prefixLength = loc[0]
+			ret = append(ret, s)
+		} else {
+			if inSubtree {
+				if prefix == "" {
+					prefix = s[:prefixLength]
+					r := []rune(prefix)
+					prefix = string(r[:len(r)-2])
+					prefixRegex = regexp.MustCompile("^" + prefixConvert.ReplaceAllString(prefix, "\\[[0-9;]+m"))
+				} else {
+					if !prefixRegex.MatchString(s) {
+						inSubtree = false
+						ret = append(ret, s)
+					}
+				}
+			} else {
+				ret = append(ret, s)
+			}
+		}
+	}
+	return
+}
+
+func hasRunningJobs() bool {
 	jobs := myExec("systemctl", "list-jobs")
 	lines := strings.Split(jobs, "\n")
 	noJob := filter(lines, `No jobs running.`)
@@ -143,60 +192,243 @@ func printJobStatus(pad *gc.Pad) {
 	}
 }
 
-func printMenu(pad *gc.Pad) {
+func printMenu(pad *gc.Pad, resources *update.ResourceCollection) {
 	pad.Printf("=== Menu === \n")
 	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
 	pad.Printf("Please select an operation:\n")
-	if !isBetweenClusterStates() {
-		pad.Printf("2)\tEnable this computer\n")
-		pad.Printf("3)\tDisable this computer\n")
-		pad.Printf("4)\tShutdown this computer\n")
-		pad.Printf("5)\tReboot this computer\n")
+	if !hasRunningJobs() {
+		if activeTarget == "multi-user.target" {
+			if allowedToEnable("cluster-active.target", resources) {
+				pad.Printf("2)\tEnable this computer (APP+DB)\n")
+			}
+			pad.Printf("4)\tShutdown this computer\n")
+			pad.Printf("5)\tReboot this computer\n")
+			if splitCluster {
+				if allowedToEnable("app-active.target", resources) {
+					pad.Printf("6)\tEnable Applications\n")
+				}
+				if allowedToEnable("db-active.target", resources) {
+					pad.Printf("7)\tEnable Databases\n")
+				}
+			}
+		} else {
+			pad.Printf("3)\tDisable this computer\n")
+			pad.Printf("4)\tShutdown this computer\n")
+			pad.Printf("5)\tReboot this computer\n")
+		}
 	}
 	pad.Printf("9)\tLogout")
 }
 
 func printSys(pad *gc.Pad) {
 	pad.Printf("=== Cluster Services === \n")
-	colorPrint(pad, strings.Split(myExec("systemctl", "list-dependencies", "cluster-active.target"), "multi-user.target")[0]+"multi-user.target")
+	var dependencies string
+	dependencies = myExec("systemctl", "list-dependencies", "cluster-active.target")
+	splitDependencies := strings.Split(dependencies, "\n")
+	filteredDependencies := systemdDependencyExclude(splitDependencies, "multi-user.target")
+	colorPrint(pad, strings.Join(filteredDependencies, "\n"))
 }
 
-func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
-	resources.UpdateList()
-	resources.RLock()
-	pad.Printf("=== DRBD resources === \n")
-	pad.Printf("%20s %10s %14s %10s %10s %14s %10s\n", "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
+func getDrbdResourcesForTarget(target string) (resources []string) {
+	dependencies := myExec("systemctl", "list-dependencies", target, "--all", "--plain")
+	splitDependencies := strings.Split(dependencies, "\n")
+	for _, s := range splitDependencies {
+		re := regexp.MustCompile(`^.*drbd-become-primary@(\w*)\.service.*$`)
+		res := re.FindStringSubmatch(s)
+		if len(res) > 0 {
+			resources = append(resources, res[1])
+		}
+	}
+	return resources
+}
 
+func contains(s []string, str string) bool {
+	for _, v := range s {
+		if v == str {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedToEnable(destinationTarget string, resources *update.ResourceCollection) bool {
+	targetResources, ok := drbdResources[destinationTarget]
+	if !ok {
+		//TODO: Think about logging this / exit hard?
+		return false
+	}
+
+	result := true
+	states := getDrbdResourcesListState(resources)
+	checkedResources := make(map[string]bool)
+	for _, s := range states {
+		if contains(targetResources, s.ResourceName) {
+			// me: secondary up to date on target resources
+			// other: secondary up to date on target resources
+			result = result && s.LocalRole == "Secondary" && s.LocalDisk == "UpToDate" && s.RemoteRole == "Secondary" && s.RemoteDisk == "UpToDate"
+			checkedResources[s.ResourceName] = true
+		}
+	}
+	if len(checkedResources) != len(targetResources) {
+		return false
+	}
+	return result
+}
+
+func getDrbdResourcesListState(resources *update.ResourceCollection) (states []VolumeState) {
+	states = make([]VolumeState, 0)
+	resources.RLock()
+	defer resources.RUnlock()
 	for _, r := range resources.List {
 		r.RLock()
+		defer r.RUnlock()
 		d := r.Device
 		keys := make([]string, 0, len(d.Volumes))
 		for k := range d.Volumes {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-
 		for _, k := range keys {
+			vState := VolumeState{}
 			v := d.Volumes[k]
-			pad.Printf("%02s%18s %10s ", v.Minor, r.Res.Name, r.Res.Role)
-			pad.Printf("%14s ", v.DiskState)
+			vState.Minor = v.Minor
+			vState.ResourceName = r.Res.Name
+			vState.LocalRole = r.Res.Role
+			vState.LocalDisk = v.DiskState
+			i := 0
 			for _, c := range r.Connections {
-				pad.Printf("%10s %10s ", c.ConnectionStatus, c.Role)
+				i = i + 1
+				vState.ConnectionStatus = c.ConnectionStatus
+				vState.RemoteRole = c.Role
 			}
 			for _, p := range r.PeerDevices {
 				if vr, ok := p.Volumes[k]; ok {
-					pad.Printf("%14s ", vr.DiskState)
-					pad.Printf("%9d%%", int(vr.OutOfSyncKiB.Current*100/v.Size))
+					vState.RemoteDisk = vr.DiskState
+					vState.OutOfSyncKib = vr.OutOfSyncKiB.Current
+					vState.VolumeSizeKib = v.Size
 				}
 			}
-			pad.Printf("\n")
+			// multiple connections means that the events in the resource
+			// have not been pruned yet (pruned every 3 sec)
+			// communicate the "unable to get proper connection state"
+			if i > 1 {
+				vState.ConnectionStatus = "Transition"
+				vState.RemoteRole = "Unknown"
+				vState.RemoteDisk = "DUnknown"
+			}
+			states = append(states, vState)
 		}
-		r.RUnlock()
 	}
-	resources.RUnlock()
+	return states
+}
+
+func compareVolumeStateForPrinting(a VolumeState, b VolumeState) bool {
+	return (a.LocalRole == b.LocalRole && a.LocalDisk == b.LocalDisk && a.ConnectionStatus == b.ConnectionStatus && a.RemoteRole == b.RemoteRole && a.RemoteDisk == b.RemoteDisk && a.OutOfSyncKib == b.OutOfSyncKib)
+}
+
+func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
+	dbResources := []string{}
+	appResources := []string{}
+	states := getDrbdResourcesListState(resources)
+	testStates := make(map[string]VolumeState)
+
+	allAppResourcesSame := true
+	allDbResourcesSame := true
+	for _, s := range states {
+		line := fmt.Sprintf("%02s%18s %10s %14s %10s %10s %14s %9d%%", s.Minor, s.ResourceName, s.LocalRole, s.LocalDisk, s.ConnectionStatus, s.RemoteRole, s.RemoteDisk, int(s.OutOfSyncKib*100/s.VolumeSizeKib))
+		if contains(drbdResources["app-active.target"], s.ResourceName) {
+			testState, ok := testStates["app"]
+			if !ok {
+				testStates["app"] = s
+				testState = s
+			}
+
+			allAppResourcesSame = (allAppResourcesSame && compareVolumeStateForPrinting(testState, s))
+			appResources = append(appResources, line)
+		} else if contains(drbdResources["db-active.target"], s.ResourceName) {
+			testState, ok := testStates["db"]
+			if !ok {
+				testStates["db"] = s
+				testState = s
+			}
+			allDbResourcesSame = (allDbResourcesSame && compareVolumeStateForPrinting(testState, s))
+			dbResources = append(dbResources, line)
+		}
+	}
+	pad.Printf("=== DRBD resources === \n")
+	pad.Printf("=== APP resources === \n")
+	pad.Printf("%20s %10s %14s %10s %10s %14s %10s\n", "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
+	if allAppResourcesSame {
+		s, _ := testStates["app"]
+		pad.Printf("%s", fmt.Sprintf("%20s %10s %14s %10s %10s %14s %9d%%", "all", s.LocalRole, s.LocalDisk, s.ConnectionStatus, s.RemoteRole, s.RemoteDisk, s.OutOfSyncKib))
+	} else {
+		pad.Printf("%s", strings.Join(appResources, "\n"))
+	}
+	pad.Printf("\n=== DB resources === \n")
+	pad.Printf("%20s %10s %14s %10s %10s %14s %10s\n", "Resource", "LocalRole", "LocalDisk", "Connection", "RemoteRole", "RemoteDisk", "OutOfSync")
+	if allDbResourcesSame {
+		s, _ := testStates["db"]
+		pad.Printf("%s", fmt.Sprintf("%20s %10s %14s %10s %10s %14s %9d%%", "all", s.LocalRole, s.LocalDisk, s.ConnectionStatus, s.RemoteRole, s.RemoteDisk, s.OutOfSyncKib))
+	} else {
+		pad.Printf("%s", strings.Join(dbResources, "\n"))
+	}
+	pad.Printf("\n")
+}
+
+func isSplitCluster() bool {
+	// cluster is split if no unit is enabled in cluster-active.target
+	dependencies := myExec("systemctl", "list-dependencies", "cluster-active.target")
+	splitDependencies := strings.Split(dependencies, "\n")
+	tmp := systemdDependencyExclude(splitDependencies, "multi-user.target")
+	tmp = systemdDependencyExclude(tmp, "app-active.target")
+	tmp = systemdDependencyExclude(tmp, "db-active.target")
+	// '<=' instead of '<' because there is an empty line at the end of tmp e.g.
+	//  cluster-active.target
+	//  ● ├─app-active.target
+	//  ● ├─db-active.target
+	//  ● └─multi-user.target
+	//  => emtpy line here
+	return len(tmp) <= 5
+}
+
+func getActiveTarget() string {
+	activeTargets := myExec("systemctl", "list-units", "--type", "target", "--state", "active")
+	targets := strings.Split(activeTargets, "\n")
+	for _, target := range targets {
+		if strings.Contains(target, "cluster-active.target") {
+			return "cluster-active.target"
+		}
+		if strings.Contains(target, "app-active.target") {
+			return "app-active.target"
+		}
+		if strings.Contains(target, "db-active.target") {
+			return "db-active.target"
+		}
+	}
+	return "multi-user.target"
+}
+
+func askConfirm(message string, command []string) {
+	confirmationPending = true
+	confirmationMessage = message
+	confirmationCommand = command
+}
+
+func printConfirmationMenu(pad *gc.Pad) {
+	pad.Printf("=== Menu === \n")
+	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
+	pad.Printf(confirmationMessage + "\n")
+	pad.Printf("Y)\tYes\n")
+	pad.Printf("N)\tNo\n")
 }
 
 func main() {
+	confirmationPending = false
+	splitCluster = isSplitCluster()
+	drbdResources = make(map[string][]string)
+	for _, target := range []string{"app-active.target", "db-active.target", "cluster-active.target"} {
+		drbdResources[target] = getDrbdResourcesForTarget(target)
+	}
 	allPads := []Paddy{Sys, Drbd, Menu, Jobs}
 	resizeChannel := make(chan os.Signal)
 	signal.Notify(resizeChannel, syscall.SIGWINCH)
@@ -241,15 +473,26 @@ func main() {
 		}
 	}()
 	go func() {
-		for m := range events {
-			//fmt.Printf(".");
-			resources.Update(m)
+		for e := range events {
+			if e.Target == resource.DisplayEvent {
+				resources.UpdateList()
+			} else if e.Target == resource.PruneEvent {
+				resources.Prune(e)
+			} else {
+				resources.Update(e)
+			}
 		}
 	}()
 	splitCols := 40
-	rowOffset := 9
+	var rowOffset int
+	if splitCluster {
+		rowOffset = 11
+	} else {
+		rowOffset = 9
+	}
 main:
 	for {
+		activeTarget = getActiveTarget()
 		for _, p := range allPads {
 			pad[p].Erase()
 		}
@@ -258,7 +501,11 @@ main:
 		//pad[Sys].Printf("%d %d\n", rows, cols)
 		printSys(pad[Sys])
 		printJobStatus(pad[Jobs])
-		printMenu(pad[Menu])
+		if confirmationPending {
+			printConfirmationMenu(pad[Menu])
+		} else {
+			printMenu(pad[Menu], resources)
+		}
 		printDrbdStatus(pad[Drbd], resources)
 		//splitCols:=int(cols/2)
 		pad[Sys].NoutRefresh(scroll, 0, 0, 0, splitRows-1, splitCols-1)
@@ -290,23 +537,46 @@ main:
 					rowOffset++
 				}
 			case '2':
-				if !isBetweenClusterStates() {
+				if !hasRunningJobs() && allowedToEnable("cluster-active.target", resources) {
 					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "cluster-active.target")
 				}
 			case '3':
-				if !isBetweenClusterStates() {
-					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "multi-user.target")
+				if !hasRunningJobs() {
+					cmd := []string{"sudo", "/usr/bin/systemctl", "isolate", "--no-block", "multi-user.target"}
+					askConfirm("Are you sure you want to disable this computer?", cmd)
 				}
 			case '4':
-				if !isBetweenClusterStates() {
-					myExec("sudo", "/usr/bin/systemctl", "poweroff")
+				if !hasRunningJobs() {
+					cmd := []string{"sudo", "/usr/bin/systemctl", "poweroff"}
+					askConfirm("Are you sure you want to shut down this computer?", cmd)
 				}
 			case '5':
-				if !isBetweenClusterStates() {
-					myExec("sudo", "/usr/bin/systemctl", "reboot")
+				if !hasRunningJobs() {
+					cmd := []string{"sudo", "/usr/bin/systemctl", "reboot"}
+					askConfirm("Are you sure you want to reboot this computer?", cmd)
+				}
+			case '6':
+				if !hasRunningJobs() && splitCluster && allowedToEnable("app-active.target", resources) {
+					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "app-active.target")
+				}
+			case '7':
+				if !hasRunningJobs() && splitCluster && allowedToEnable("db-active.target", resources) {
+					myExec("sudo", "/usr/bin/systemctl", "isolate", "--no-block", "db-active.target")
 				}
 			case '9':
 				break main
+			case 'Y':
+				if confirmationPending {
+					confirmationPending = false
+					myExec(confirmationCommand[0], confirmationCommand[1:]...)
+				}
+			case 'N':
+				if confirmationPending {
+					confirmationPending = false
+					// cleaning variables just to be on the safe side of things
+					confirmationMessage = ""
+					confirmationCommand = nil
+				}
 			}
 		case <-fin:
 			break main
