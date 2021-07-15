@@ -24,6 +24,7 @@ package main
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"github.com/LINBIT/drbdtop/pkg/collect"
 	"github.com/LINBIT/drbdtop/pkg/resource"
@@ -46,7 +47,8 @@ var Version string
 var colorMap map[int]int
 var maxPair int
 var splitCluster bool
-var activeTarget string
+var activeTargets []string
+var drbd bool
 var drbdResources map[string][]string
 var confirmationPending bool
 var confirmationMessage string
@@ -166,6 +168,14 @@ func systemdDependencyExclude(ss []string, rex string) (ret []string) {
 	return
 }
 
+func isDrbd() bool {
+	if _, err := os.Stat("/proc/drbd"); errors.Is(err, os.ErrNotExist) {
+		return false
+	} else {
+		return true
+	}
+}
+
 func hasRunningJobs() bool {
 	jobs := myExec("systemctl", "list-jobs")
 	lines := strings.Split(jobs, "\n")
@@ -197,7 +207,7 @@ func printMenu(pad *gc.Pad, resources *update.ResourceCollection) {
 	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
 	pad.Printf("Please select an operation:\n")
 	if !hasRunningJobs() {
-		if activeTarget == "multi-user.target" {
+		if containsAll(activeTargets, "multi-user.target") {
 			if allowedToEnable("cluster-active.target", resources) {
 				pad.Printf("2)\tEnable this computer (APP+DB)\n")
 			}
@@ -242,16 +252,25 @@ func getDrbdResourcesForTarget(target string) (resources []string) {
 	return resources
 }
 
-func contains(s []string, str string) bool {
-	for _, v := range s {
-		if v == str {
-			return true
+func containsAll(s []string, strings ...string) bool {
+	result := true
+	for _, str := range strings {
+		for _, v := range s {
+			result = result && (v == str)
+			if !result {
+				// if false exit early
+				return result
+			}
 		}
 	}
-	return false
+	return result
 }
 
 func allowedToEnable(destinationTarget string, resources *update.ResourceCollection) bool {
+	// no need to check drbd State if no drbd
+	if !drbd {
+		return true
+	}
 	targetResources, ok := drbdResources[destinationTarget]
 	if !ok {
 		//TODO: Think about logging this / exit hard?
@@ -262,7 +281,7 @@ func allowedToEnable(destinationTarget string, resources *update.ResourceCollect
 	states := getDrbdResourcesListState(resources)
 	checkedResources := make(map[string]bool)
 	for _, s := range states {
-		if contains(targetResources, s.ResourceName) {
+		if containsAll(targetResources, s.ResourceName) {
 			// me: secondary up to date on target resources
 			// other: secondary up to date on target resources
 			result = result && s.LocalRole == "Secondary" && s.LocalDisk == "UpToDate" && s.RemoteRole == "Secondary" && s.RemoteDisk == "UpToDate"
@@ -326,6 +345,29 @@ func compareVolumeStateForPrinting(a VolumeState, b VolumeState) bool {
 	return (a.LocalRole == b.LocalRole && a.LocalDisk == b.LocalDisk && a.ConnectionStatus == b.ConnectionStatus && a.RemoteRole == b.RemoteRole && a.RemoteDisk == b.RemoteDisk && a.OutOfSyncKib == b.OutOfSyncKib)
 }
 
+func printGenericStatus(pad *gc.Pad) {
+	pad.Printf("=== Resources === \n")
+	for _, target := range activeTargets {
+		switch target {
+		case "app-active.target":
+			pad.Printf("\n=== APP resources === \n")
+			pad.Printf("%20s %10s\n", "Resource", "LocalRole")
+			pad.Printf("%s", fmt.Sprintf("%20s %10s", "all", "Primary"))
+		case "db-active.target":
+			pad.Printf("\n=== DB resources === \n")
+			pad.Printf("%20s %10s\n", "Resource", "LocalRole")
+			pad.Printf("%s", fmt.Sprintf("%20s %10s", "all", "Primary"))
+		case "multi-user.target":
+			pad.Printf("\n=== APP resources === \n")
+			pad.Printf("%20s %10s\n", "Resource", "LocalRole")
+			pad.Printf("%s", fmt.Sprintf("%20s %10s", "all", "Secondary"))
+			pad.Printf("\n=== DB resources === \n")
+			pad.Printf("%20s %10s\n", "Resource", "LocalRole")
+			pad.Printf("%s", fmt.Sprintf("%20s %10s", "all", "Secondary"))
+		}
+	}
+}
+
 func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 	dbResources := []string{}
 	appResources := []string{}
@@ -336,7 +378,7 @@ func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 	allDbResourcesSame := true
 	for _, s := range states {
 		line := fmt.Sprintf("%02s%18s %10s %14s %10s %10s %14s %9d%%", s.Minor, s.ResourceName, s.LocalRole, s.LocalDisk, s.ConnectionStatus, s.RemoteRole, s.RemoteDisk, int(s.OutOfSyncKib*100/s.VolumeSizeKib))
-		if contains(drbdResources["app-active.target"], s.ResourceName) {
+		if containsAll(drbdResources["app-active.target"], s.ResourceName) {
 			testState, ok := testStates["app"]
 			if !ok {
 				testStates["app"] = s
@@ -345,7 +387,7 @@ func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 
 			allAppResourcesSame = (allAppResourcesSame && compareVolumeStateForPrinting(testState, s))
 			appResources = append(appResources, line)
-		} else if contains(drbdResources["db-active.target"], s.ResourceName) {
+		} else if containsAll(drbdResources["db-active.target"], s.ResourceName) {
 			testState, ok := testStates["db"]
 			if !ok {
 				testStates["db"] = s
@@ -391,21 +433,25 @@ func isSplitCluster() bool {
 	return len(tmp) <= 5
 }
 
-func getActiveTarget() string {
-	activeTargets := myExec("systemctl", "list-units", "--type", "target", "--state", "active")
-	targets := strings.Split(activeTargets, "\n")
+func getActiveTargets() []string {
+	allActiveTargets := myExec("systemctl", "list-units", "--type", "target", "--state", "active")
+	targets := strings.Split(allActiveTargets, "\n")
+	result := []string{}
 	for _, target := range targets {
 		if strings.Contains(target, "cluster-active.target") {
-			return "cluster-active.target"
+			result = append(result, "cluster-active.target")
 		}
 		if strings.Contains(target, "app-active.target") {
-			return "app-active.target"
+			result = append(result, "app-active.target")
 		}
 		if strings.Contains(target, "db-active.target") {
-			return "db-active.target"
+			result = append(result, "db-active.target")
 		}
 	}
-	return "multi-user.target"
+	if len(result) == 0 {
+		result = append(result, "multi-user.target")
+	}
+	return result
 }
 
 func askConfirm(message string, command []string) {
@@ -424,6 +470,7 @@ func printConfirmationMenu(pad *gc.Pad) {
 
 func main() {
 	confirmationPending = false
+	drbd = isDrbd()
 	splitCluster = isSplitCluster()
 	drbdResources = make(map[string][]string)
 	for _, target := range []string{"app-active.target", "db-active.target", "cluster-active.target"} {
@@ -492,7 +539,7 @@ func main() {
 	}
 main:
 	for {
-		activeTarget = getActiveTarget()
+		activeTargets = getActiveTargets()
 		for _, p := range allPads {
 			pad[p].Erase()
 		}
@@ -506,7 +553,11 @@ main:
 		} else {
 			printMenu(pad[Menu], resources)
 		}
-		printDrbdStatus(pad[Drbd], resources)
+		if drbd {
+			printDrbdStatus(pad[Drbd], resources)
+		} else {
+			printGenericStatus(pad[Drbd])
+		}
 		//splitCols:=int(cols/2)
 		pad[Sys].NoutRefresh(scroll, 0, 0, 0, splitRows-1, splitCols-1)
 		pad[Drbd].NoutRefresh(scroll, 0, 0, splitCols+1, splitRows-1, cols-1)
@@ -546,11 +597,19 @@ main:
 					askConfirm("Are you sure you want to disable this computer?", cmd)
 				}
 			case '4':
+				if containsAll(activeTargets, "cluster-active.target", "app-active.target", "db-active.target") {
+					askConfirm("ERROR: System needs to be Secondary\nto shutdown. Please disable first", []string{})
+					break
+				}
 				if !hasRunningJobs() {
 					cmd := []string{"sudo", "/usr/bin/systemctl", "poweroff"}
 					askConfirm("Are you sure you want to shut down this computer?", cmd)
 				}
 			case '5':
+				if containsAll(activeTargets, "cluster-active.target", "app-active.target", "db-active.target") {
+					askConfirm("ERROR: System needs to be Secondary\nto reboot. Please disable first", []string{})
+					break
+				}
 				if !hasRunningJobs() {
 					cmd := []string{"sudo", "/usr/bin/systemctl", "reboot"}
 					askConfirm("Are you sure you want to reboot this computer?", cmd)
@@ -568,7 +627,9 @@ main:
 			case 'Y':
 				if confirmationPending {
 					confirmationPending = false
-					myExec(confirmationCommand[0], confirmationCommand[1:]...)
+					if len(confirmationCommand) >= 1 {
+						myExec(confirmationCommand[0], confirmationCommand[1:]...)
+					}
 				}
 			case 'N':
 				if confirmationPending {
