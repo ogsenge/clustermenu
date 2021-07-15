@@ -483,7 +483,7 @@ func main() {
 
 	colorMap = make(map[int]int)
 	fin := SetupCloseHandler()
-	C.setlocale(C.LC_ALL, C.CString(""))
+	C.setlocale(C.LC_ALL, C.CString("en_US.UTF-8"))
 	errors := make(chan error, 100)
 
 	duration := time.Second * 1
