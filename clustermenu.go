@@ -473,6 +473,8 @@ func printConfirmationMenu(pad *gc.Pad) {
 }
 
 func main() {
+	// make sure that /usr/sbin is in path, needed for drbdsetup
+	os.Setenv("PATH", os.Getenv("PATH")+":/usr/sbin")
 	confirmationPending = false
 	drbd = isDrbd()
 	splitCluster = isSplitCluster()
