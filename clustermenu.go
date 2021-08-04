@@ -207,7 +207,7 @@ func printMenu(pad *gc.Pad, resources *update.ResourceCollection) {
 	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
 	pad.Printf("Please select an operation:\n")
 	if !hasRunningJobs() {
-		if containsAll(activeTargets, "multi-user.target") {
+		if contains(activeTargets, "multi-user.target") {
 			if allowedToEnable("cluster-active.target", resources) {
 				pad.Printf("2)\tEnable this computer (APP+DB)\n")
 			}
@@ -252,18 +252,22 @@ func getDrbdResourcesForTarget(target string) (resources []string) {
 	return resources
 }
 
-func containsAll(s []string, strings ...string) bool {
-	result := true
-	for _, str := range strings {
-		for _, v := range s {
-			result = result && (v == str)
-			if !result {
-				// if false exit early
-				return result
-			}
+func contains(s []string, v string) bool {
+	for _, a := range s {
+		if a == v {
+			return true
 		}
 	}
-	return result
+	return false
+}
+
+func containsAll(s []string, strings ...string) bool {
+	for _, str := range strings {
+		if !contains(s, str) {
+			return false
+		}
+	}
+	return true
 }
 
 func allowedToEnable(destinationTarget string, resources *update.ResourceCollection) bool {
@@ -281,7 +285,7 @@ func allowedToEnable(destinationTarget string, resources *update.ResourceCollect
 	states := getDrbdResourcesListState(resources)
 	checkedResources := make(map[string]bool)
 	for _, s := range states {
-		if containsAll(targetResources, s.ResourceName) {
+		if contains(targetResources, s.ResourceName) {
 			// me: secondary up to date on target resources
 			// other: secondary up to date on target resources
 			result = result && s.LocalRole == "Secondary" && s.LocalDisk == "UpToDate" && s.RemoteRole == "Secondary" && s.RemoteDisk == "UpToDate"
@@ -378,7 +382,7 @@ func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 	allDbResourcesSame := true
 	for _, s := range states {
 		line := fmt.Sprintf("%02s%18s %10s %14s %10s %10s %14s %9d%%", s.Minor, s.ResourceName, s.LocalRole, s.LocalDisk, s.ConnectionStatus, s.RemoteRole, s.RemoteDisk, int(s.OutOfSyncKib*100/s.VolumeSizeKib))
-		if containsAll(drbdResources["app-active.target"], s.ResourceName) {
+		if contains(drbdResources["app-active.target"], s.ResourceName) {
 			testState, ok := testStates["app"]
 			if !ok {
 				testStates["app"] = s
@@ -387,7 +391,7 @@ func printDrbdStatus(pad *gc.Pad, resources *update.ResourceCollection) {
 
 			allAppResourcesSame = (allAppResourcesSame && compareVolumeStateForPrinting(testState, s))
 			appResources = append(appResources, line)
-		} else if containsAll(drbdResources["db-active.target"], s.ResourceName) {
+		} else if contains(drbdResources["db-active.target"], s.ResourceName) {
 			testState, ok := testStates["db"]
 			if !ok {
 				testStates["db"] = s
