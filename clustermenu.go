@@ -53,6 +53,7 @@ var drbdResources map[string][]string
 var confirmationPending bool
 var confirmationMessage string
 var confirmationCommand []string
+var myhostname string
 
 type Paddy int
 
@@ -81,6 +82,19 @@ func SetupCloseHandler() chan os.Signal {
 	return c
 }
 
+/* color code for gc.InitPair:
+<0 = terminal default
+0 = black
+1 = red
+2 = green
+3 = yellow
+4 = blue
+5 = pink
+6 = turquoise
+7 = gray
+>7 = black
+black foreground color not allowed,
+since this functions always prints with black background */
 func colorPrint(win *gc.Pad, out string) {
 	dummyString := "0m" + out
 	tokens := strings.Split(dummyString, "\x1b[")
@@ -93,7 +107,11 @@ func colorPrint(win *gc.Pad, out string) {
 		} else {
 			maxPair++
 			colorMap[c] = maxPair
-			gc.InitPair(int16(maxPair), int16(c-30), gc.C_BLACK)
+			if c >= 31 && c <= 37 {
+				gc.InitPair(int16(maxPair), int16(c-30), gc.C_BLACK)
+			} else {
+				gc.InitPair(int16(maxPair), gc.C_WHITE, gc.C_BLACK)
+			}
 			win.ColorOn(int16(maxPair))
 		}
 		win.Print(tmp[1])
@@ -190,6 +208,7 @@ func printJobStatus(pad *gc.Pad) {
 	pad.Printf("=== Jobs ===\n")
 	jobs := myExec("systemctl", "list-jobs")
 	lines := strings.Split(jobs, "\n")
+	// returns array of lines where either "running" or "waiting" is present
 	run := filter(lines, `running`)
 	wait := filter(lines, `waiting`)
 	if len(run) > 0 {
@@ -204,6 +223,7 @@ func printJobStatus(pad *gc.Pad) {
 
 func printMenu(pad *gc.Pad, resources *update.ResourceCollection) {
 	pad.Printf("=== Menu === \n")
+	pad.Printf(myhostname)
 	pad.Printf(time.Now().Format(time.RFC1123) + "\n")
 	pad.Printf("Please select an operation:\n")
 	if !hasRunningJobs() {
@@ -477,6 +497,7 @@ func main() {
 	os.Setenv("PATH", os.Getenv("PATH")+":/usr/sbin")
 	confirmationPending = false
 	drbd = isDrbd()
+	myhostname = myExec("hostname")
 	splitCluster = isSplitCluster()
 	drbdResources = make(map[string][]string)
 	for _, target := range []string{"app-active.target", "db-active.target", "cluster-active.target"} {
@@ -510,13 +531,17 @@ func main() {
 	gc.CBreak(true)
 	gc.Cursor(0)
 	gc.StartColor()
-	gc.UseDefaultColors()
+	// gc.UseDefaultColors()
 	stdscr.NoutRefresh()
 	pad := make(map[Paddy]*gc.Pad)
 	for _, p := range allPads {
 		pad[p] = newPad(800, 200)
 	}
 	stdscr.Keypad(true)
+
+	// black background, use gc.UseDefaultColors() func for default console colors
+	gc.InitPair(0, gc.C_WHITE, gc.C_BLACK)
+	stdscr.SetBackground(gc.ColorPair(0))
 
 	key := make(chan gc.Key)
 
