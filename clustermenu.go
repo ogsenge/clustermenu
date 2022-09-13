@@ -158,28 +158,29 @@ func systemdDependencyExclude(ss []string, rex string) (ret []string) {
 	var prefixRegex *regexp.Regexp
 	prefixLength := 0
 	re := regexp.MustCompile(rex)
-	prefixConvert := regexp.MustCompile(`\[[0-9;]+m`)
-	for _, s := range ss {
+	colorCode := regexp.MustCompile(`\x1b\[[0-9;]+m`)
+	for _, line := range ss {
+		s:=colorCode.ReplaceAllString(line,"")
 		if loc := re.FindStringIndex(s); loc != nil {
 			inSubtree = true
 			prefix = ""
 			prefixLength = loc[0]
-			ret = append(ret, s)
+			ret = append(ret, line)
 		} else {
 			if inSubtree {
 				if prefix == "" {
 					prefix = s[:prefixLength]
 					r := []rune(prefix)
-					prefix = string(r[:len(r)-2])
-					prefixRegex = regexp.MustCompile("^" + prefixConvert.ReplaceAllString(prefix, "\\[[0-9;]+m"))
+					prefix = string(r[1:len(r)-2])
+					prefixRegex = regexp.MustCompile("^." + prefix)
 				} else {
 					if !prefixRegex.MatchString(s) {
 						inSubtree = false
-						ret = append(ret, s)
+						ret = append(ret, line)
 					}
 				}
 			} else {
-				ret = append(ret, s)
+				ret = append(ret, line)
 			}
 		}
 	}
